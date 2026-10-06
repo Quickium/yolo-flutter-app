@@ -1,3 +1,13 @@
+## 0.6.11-quickium.1 (fork Quickium, branch quickium/tensor-npu)
+
+- **Feature**: Android LiteRT models try the Google Tensor TPU (G3-G6) through on-device JIT compilation, with the
+  `libLiteRtDispatch_GoogleTensor.so` and `libLiteRtCompilerPlugin_google_tensor.so` from LiteRT release v2.2.0 in
+  `android/src/main/jniLibs`. The NPU is kept only when one timed inference beats the GPU: apps outside Google's
+  EdgeTPU allowlist get the JIT compile refused and LiteRT silently runs the model on the CPU.
+- **Change**: `com.google.ai.edge.litert:litert` 2.1.5 -> 2.2.0, matching those libraries. Apps on AGP 9 need
+  `android.uniquePackageNames=false` (litert and litert-api 2.2.0 share a namespace) and
+  `packaging.jniLibs.useLegacyPackaging = true` so the libraries land in `nativeLibraryDir`.
+
 ## 0.6.11
 
 - **Fix**: Require UltralyticsYOLO `>= 8.9.13` on iOS for safe float16 object detection decoding.

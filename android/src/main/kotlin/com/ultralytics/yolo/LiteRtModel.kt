@@ -5,6 +5,8 @@ package com.ultralytics.yolo
 import android.util.Log
 import com.google.ai.edge.litert.Accelerator
 import com.google.ai.edge.litert.CompiledModel
+import com.google.ai.edge.litert.Environment
+import com.google.ai.edge.litert.NpuCompatibilityChecker
 import com.google.ai.edge.litert.TensorBuffer
 import com.google.ai.edge.litert.TensorType
 import kotlin.math.roundToInt
@@ -51,7 +53,7 @@ class LiteRtModel(
     /** True when the model input is NCHW `[1,3,H,W]` (litert-torch) rather than NHWC `[1,H,W,3]` (legacy onnx2tf). */
     override val inputUsesNchw: Boolean
 
-    /** Accelerator actually in use after the ladder resolves: "GPU" or "CPU". */
+    /** Accelerator actually in use after the ladder resolves: "NPU", "GPU" or "CPU". */
     override val accelerator: String
 
     /**
@@ -66,6 +68,10 @@ class LiteRtModel(
     /** Output tensor dimensions, in order (e.g. [[1, 84, 8400]] for detect). Empty entries if a name doesn't resolve. */
     override val outputDims: List<IntArray>
 
+    // Declared before init: Kotlin runs property initializers and init blocks in source order, so a later
+    // declaration would reset the environment init stored here back to null.
+    private var npuEnvironment: Environment? = null
+
     init {
         var prepared: PreparedModel? = null
         var acc = "CPU"
@@ -75,6 +81,16 @@ class LiteRtModel(
                 acc = "GPU"
             } catch (e: Throwable) {
                 Log.w(tag, "GPU accelerator could not run model, falling back to CPU: ${e.message}")
+            }
+            // Quickium: Google Tensor TPU, kept only when it actually beats the GPU (see preferTensorNpu).
+            val npu = prepareTensorNpu(modelPath)
+            if (npu != null && preferTensorNpu(npu, prepared)) {
+                prepared?.let(::release)
+                prepared = npu
+                acc = "NPU"
+            } else if (npu != null) {
+                release(npu)
+                closeNpuEnvironment()
             }
         }
         if (prepared == null) {
@@ -99,7 +115,68 @@ class LiteRtModel(
         )
     }
 
-    private fun prepareModel(modelPath: String, accelerator: Accelerator): PreparedModel {
+    /**
+     * Quickium: on Google Tensor (G3-G6) LiteRT compiles the model for the TPU on the device (JIT), with the
+     * libLiteRtDispatch_GoogleTensor.so and libLiteRtCompilerPlugin_google_tensor.so shipped in this plugin's jniLibs
+     * and the system's /vendor/lib64/libedgetpu_litert.so. Null when the device or the libraries rule it out.
+     */
+    private fun prepareTensorNpu(modelPath: String): PreparedModel? {
+        if (!NpuCompatibilityChecker.GoogleTensor.isDeviceSupported()) return null
+        val libDir = context.applicationInfo.nativeLibraryDir
+        // Only on disk when the app extracts native libs (packaging.jniLibs.useLegacyPackaging = true).
+        if (!java.io.File(libDir, "libLiteRtDispatch_GoogleTensor.so").exists()) return null
+        return try {
+            val environment = Environment.create(
+                mapOf(
+                    Environment.Option.DispatchLibraryDir to libDir,
+                    Environment.Option.CompilerPluginLibraryDir to libDir,
+                )
+            )
+            npuEnvironment = environment
+            prepareModel(modelPath, Accelerator.NPU, environment)
+        } catch (e: Throwable) {
+            Log.w(tag, "Google Tensor NPU could not run model: ${e.message}")
+            closeNpuEnvironment()
+            null
+        }
+    }
+
+    /**
+     * The TPU only serves apps on Google's EdgeTPU allowlist (vendor.google.edgetpu_app_service). For any other app the
+     * JIT compile is refused and LiteRT silently runs the "NPU" model on the CPU, ~15x slower than the GPU on a Pixel
+     * 10a. Timing one inference of each is the only signal the Kotlin API exposes, so the NPU stays only if faster.
+     */
+    private fun preferTensorNpu(npu: PreparedModel, gpu: PreparedModel?): Boolean {
+        if (gpu == null) return true
+        val npuMs = timeOneRun(npu)
+        val gpuMs = timeOneRun(gpu)
+        Log.i(tag, "Google Tensor NPU ${"%.1f".format(npuMs)} ms vs GPU ${"%.1f".format(gpuMs)} ms per inference")
+        return npuMs < gpuMs
+    }
+
+    private fun timeOneRun(prepared: PreparedModel): Double {
+        val start = System.nanoTime()
+        prepared.model.run(prepared.inputBuffers, prepared.outputBuffers)
+        // Reading the output waits for the GPU, whose run() only enqueues the work.
+        readAsFloats(prepared.outputBuffers[0], prepared.outputTypes[0])
+        return (System.nanoTime() - start) / 1e6
+    }
+
+    private fun release(prepared: PreparedModel) {
+        closeBuffers(prepared.inputBuffers, prepared.outputBuffers)
+        runCatching { prepared.model.close() }
+    }
+
+    private fun closeNpuEnvironment() {
+        npuEnvironment?.let { runCatching { it.close() } }
+        npuEnvironment = null
+    }
+
+    private fun prepareModel(
+        modelPath: String,
+        accelerator: Accelerator,
+        environment: Environment? = null,
+    ): PreparedModel {
         val options = CompiledModel.Options(accelerator)
         if (accelerator == Accelerator.GPU) {
             // Serialize compiled GPU programs so subsequent model opens skip CL compilation entirely.
@@ -109,7 +186,11 @@ class LiteRtModel(
                 serializeProgramCache = true,
             )
         }
-        val compiled = CompiledModel.create(modelPath, options)
+        val compiled = if (environment != null) {
+            CompiledModel.create(modelPath, options, environment)
+        } else {
+            CompiledModel.create(modelPath, options)
+        }
         val inputs: List<TensorBuffer>
         val outputs: List<TensorBuffer>
         try {
@@ -214,6 +295,7 @@ class LiteRtModel(
         } catch (_: Throwable) {
             // best-effort
         }
+        closeNpuEnvironment()
     }
 
     private fun closeBuffers(inputs: List<TensorBuffer>, outputs: List<TensorBuffer>) {
