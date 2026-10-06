@@ -4,6 +4,8 @@
   `libLiteRtDispatch_GoogleTensor.so` and `libLiteRtCompilerPlugin_google_tensor.so` from LiteRT release v2.2.0 in
   `android/src/main/jniLibs`. The NPU is kept only when one timed inference beats the GPU: apps outside Google's
   EdgeTPU allowlist get the JIT compile refused and LiteRT silently runs the model on the CPU.
+  When the "NPU" comes out more than 5x slower than the GPU (the refused-app signature), later model loads skip the
+  NPU until the process restarts.
 - **Change**: `com.google.ai.edge.litert:litert` 2.1.5 -> 2.2.0, matching those libraries. Apps on AGP 9 need
   `android.uniquePackageNames=false` (litert and litert-api 2.2.0 share a namespace) and
   `packaging.jniLibs.useLegacyPackaging = true` so the libraries land in `nativeLibraryDir`.

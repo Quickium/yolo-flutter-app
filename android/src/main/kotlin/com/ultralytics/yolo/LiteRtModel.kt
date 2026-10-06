@@ -121,7 +121,7 @@ class LiteRtModel(
      * and the system's /vendor/lib64/libedgetpu_litert.so. Null when the device or the libraries rule it out.
      */
     private fun prepareTensorNpu(modelPath: String): PreparedModel? {
-        if (!NpuCompatibilityChecker.GoogleTensor.isDeviceSupported()) return null
+        if (tensorNpuRefused || !NpuCompatibilityChecker.GoogleTensor.isDeviceSupported()) return null
         val libDir = context.applicationInfo.nativeLibraryDir
         // Only on disk when the app extracts native libs (packaging.jniLibs.useLegacyPackaging = true).
         if (!java.io.File(libDir, "libLiteRtDispatch_GoogleTensor.so").exists()) return null
@@ -151,6 +151,9 @@ class LiteRtModel(
         val npuMs = timeOneRun(npu)
         val gpuMs = timeOneRun(gpu)
         Log.i(tag, "Google Tensor NPU ${"%.1f".format(npuMs)} ms vs GPU ${"%.1f".format(gpuMs)} ms per inference")
+        // A refused app's "NPU" is the CPU, 11-28x slower than the GPU on a Pixel 10a. The allowlist is per app, so
+        // stop paying the two CPU inferences on every model load until the process restarts.
+        if (npuMs > TENSOR_NPU_REFUSED_RATIO * gpuMs) tensorNpuRefused = true
         return npuMs < gpuMs
     }
 
@@ -313,5 +316,12 @@ class LiteRtModel(
                 // best-effort
             }
         }
+    }
+
+    private companion object {
+        const val TENSOR_NPU_REFUSED_RATIO = 5
+
+        @Volatile
+        var tensorNpuRefused = false
     }
 }
